@@ -1,0 +1,41 @@
+# ---------------- Python ----------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+
+# ---------------- Virtual environments ----------------
+.venv/
+venv/
+env/
+.env
+
+# ---------------- Conda ----------------
+conda-meta/
+*.conda
+*.lock
+
+# ---------------- Streamlit ----------------
+.streamlit/secrets.toml
+
+# ---------------- OS junk ----------------
+.DS_Store
+Thumbs.db
+
+# ---------------- Data (DO NOT COMMIT) ----------------
+data/5min_data/
+data/station_metadata/
+data/cache_parquet/
+data/derived/
+
+
+# ---------------- Logs ----------------
+*.log
+
+# ---------------- Editors ----------------
+.vscode/
+.idea/
+*.swp

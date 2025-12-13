@@ -1,0 +1,69 @@
+# .streamlit/config.toml
+
+[theme]
+# ---------- Global ----------
+font = "sans-serif"
+headingFont = "sans-serif"
+codeFont = "monospace"
+
+baseFontSize = 16
+baseFontWeight = 400
+
+# h1 → h6
+headingFontSizes = ["2.25rem", "1.75rem", "1.4rem", "1.15rem", "1.0rem", "0.9rem"]
+headingFontWeights = [700, 600, 600, 600, 500, 500]
+
+codeFontSize = "0.875rem"
+codeFontWeight = 500
+
+showSidebarBorder = true
+base = "dark"
+
+# -------- DARK THEME (VSCode-ish) --------
+[theme.dark]
+primaryColor = "#22c55e"
+backgroundColor = "#0f111a"
+secondaryBackgroundColor = "#171a23"
+textColor = "#e6edf3"
+linkColor = "#22c55e"
+linkUnderline = false
+borderColor = "#2b2f3a"
+showWidgetBorder = true
+baseRadius = "12px"
+buttonRadius = "12px"
+
+[theme.dark.sidebar]
+font = "sans-serif"
+headingFont = "sans-serif"
+backgroundColor = "#0c0e14"
+secondaryBackgroundColor = "#141824"
+textColor = "#e6edf3"
+borderColor = "#2b2f3a"
+
+# -------- LIGHT THEME (Warm / Sublime-ish) --------
+[theme.light]
+primaryColor = "#4F46E5"                 # subtle indigo accent
+backgroundColor = "#F7F3EE"              # warm paper
+secondaryBackgroundColor = "#FFFDF9"     # cards
+textColor = "#1F2937"
+linkColor = "#4F46E5"
+linkUnderline = false
+borderColor = "#E7DED4"
+showWidgetBorder = true
+baseRadius = "12px"
+buttonRadius = "12px"
+
+[theme.light.sidebar]
+font = "sans-serif"
+headingFont = "sans-serif"
+backgroundColor = "#F1EBE3"
+secondaryBackgroundColor = "#FFFDF9"
+textColor = "#1F2937"
+borderColor = "#E7DED4"
+
+[browser]
+gatherUsageStats = false
+
+[ui]
+sidebarState = "expanded"
+
