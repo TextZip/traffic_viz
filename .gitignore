@@ -27,8 +27,8 @@ Thumbs.db
 
 # ---------------- Data (DO NOT COMMIT) ----------------
 data/5min_data/
-data/station_metadata/
-data/cache_parquet/
+!data/station_metadata/
+!data/cache_parquet/
 data/derived/
 
 

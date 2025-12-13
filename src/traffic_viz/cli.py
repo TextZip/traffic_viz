@@ -62,9 +62,9 @@ def main():
     prep.add_argument("--force", action="store_true",
                       help="Rebuild cache_parquet/ even if it exists.")
 
-    # --- optional: doctor ---
+    # --- optional: diagnostics ---
     doc = sub.add_parser(
-        "doctor", help="Check that data folders exist and look sane")
+        "diagnostics", help="Check that data folders exist and look sane")
     doc.add_argument("--data-dir", default=None)
 
     args = p.parse_args()
@@ -81,7 +81,7 @@ def main():
     raw_dir = data_dir / "5min_data"
     cache_dir = data_dir / "cache_parquet"
 
-    if args.cmd == "doctor":
+    if args.cmd == "diagnostics":
         print(f"[INFO] DATA_DIR = {data_dir}")
         print(
             f"[INFO] station_metadata/: {'OK' if _has_station_metadata(meta_dir) else 'MISSING/EMPTY'} ({meta_dir})")
