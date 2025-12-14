@@ -11,8 +11,6 @@ using PeMS 5-minute station data.
 - Interactive Streamlit dashboard
 - CLI for preprocessing and diagnostics
 
-https://drive.google.com/drive/folders/1Ms151kBdxH-d284sY8oyMqVU61OwpqXG?usp=sharing
-
 ## Quick start
 
 ```bash

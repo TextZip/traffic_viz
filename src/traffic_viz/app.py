@@ -8,7 +8,13 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.colors import sample_colorscale
 import requests
-from functools import lru_cache
+# from functools import lru_cache
+from sklearn.mixture import GaussianMixture
+try:
+    from hmmlearn.hmm import GaussianHMM
+    HAS_HMM = True
+except Exception:
+    HAS_HMM = False
 
 from traffic_viz.metadata_tmdd import build_i5_nb_station_order
 from traffic_viz.travel_time import travel_time_samples
@@ -60,9 +66,22 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("I-5 NB Travel Time Predictor (PeMS)")
+st.title("I-5 Northbound Travel Time Predictor", text_alignment="center")
 st.caption(
-    "Pick origin/destination stations by name and get probabilistic travel-time stats.")
+    "Pick origin/destination stations by name to get probabilistic travel-time stats.", text_alignment="center")
+# Create left/right spacers to center the button group
+st.markdown(
+    """
+    <div style="text-align: center; margin-top: 0.5rem;">
+        🔗 <a href="https://github.com/TextZip/traffic_viz" target="_blank">Code</a>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        📄 <a href="https://your-report-link.com" target="_blank">Report</a>
+        &nbsp;&nbsp;|&nbsp;&nbsp;
+        📂 <a href="https://drive.google.com/drive/folders/1Ms151kBdxH-d284sY8oyMqVU61OwpqXG?usp=sharing" target="_blank">Dataset</a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ---------------------- Data loaders ----------------------
 
@@ -96,35 +115,6 @@ def compute_T_for_corridor(df, ordered, origin: int, dest: int, min_coverage: fl
     out["tod_bin"] = (minutes // 30).astype(int)
     out["tod_label"] = out["tod_bin"].apply(
         lambda b: f"{(b*30)//60:02d}:{(b*30)%60:02d}")
-    return out
-
-
-@st.cache_data(show_spinner=False)
-def station_bucket_speed(df: pd.DataFrame, stations: list[int], weekday: bool, time_str: str) -> pd.DataFrame:
-    """
-    Returns per-station mean speed for the selected (weekday/weekend, 30-min bin).
-    df is your filtered 5-min parquet cache with columns at least:
-      Station, Timestamp, AvgSpeed
-    """
-    # Parse time_str like "16:30"
-    hh = int(time_str[:2])
-    mm = int(time_str[3:])
-    target_bin = (hh * 60 + mm) // 30
-
-    d = df[df["Station"].isin(stations)].copy()
-    d = d.dropna(subset=["Timestamp", "AvgSpeed"])
-    d["weekday"] = d["Timestamp"].dt.weekday < 5
-    minutes = d["Timestamp"].dt.hour * 60 + d["Timestamp"].dt.minute
-    d["tod_bin"] = (minutes // 30).astype(int)
-
-    d = d[(d["weekday"] == weekday) & (d["tod_bin"] == target_bin)]
-    if d.empty:
-        return pd.DataFrame({"Station": stations, "mean_speed": np.nan})
-
-    out = (
-        d.groupby("Station", as_index=False)
-         .agg(mean_speed=("AvgSpeed", "mean"), n=("AvgSpeed", "size"))
-    )
     return out
 
 
@@ -221,6 +211,195 @@ def geocode_us_candidates_with_fallback(query: str, viewbox, limit: int = 5):
         ]
     except Exception:
         return []
+
+
+@st.cache_data(show_spinner=False)
+def station_bucket_speed(df, corridor_stations, weekday: bool, tod_label: str):
+    d = df[df["Station"].isin(corridor_stations)].copy()
+    d = d.dropna(subset=["Timestamp", "AvgSpeed"])
+    d["weekday"] = d["Timestamp"].dt.weekday < 5
+    minutes = d["Timestamp"].dt.hour * 60 + d["Timestamp"].dt.minute
+    d["tod_bin"] = (minutes // 30).astype(int)
+    d["tod_label"] = d["tod_bin"].apply(
+        lambda b: f"{(b*30)//60:02d}:{(b*30)%60:02d}")
+
+    b = d[(d["weekday"] == weekday) & (d["tod_label"] == tod_label)]
+    g = (b.groupby("Station", as_index=False)
+         .agg(mean_speed=("AvgSpeed", "mean"),
+              p10_speed=("AvgSpeed", lambda s: s.quantile(0.10)),
+              p50_speed=("AvgSpeed", "median"),
+              p90_speed=("AvgSpeed", lambda s: s.quantile(0.90)),
+              n=("AvgSpeed", "size")))
+    return g
+
+
+@st.cache_data(show_spinner=False)
+def fit_gmm_cached(
+    x_values: np.ndarray,
+    k_mode: str,
+    K: int,
+    k_max: int,
+    seed: int,
+):
+    x_np = np.asarray(x_values, dtype=float)
+    if x_np.size < 30:
+        return None, None, None
+
+    X = x_np.reshape(-1, 1)
+
+    if k_mode.startswith("Auto"):
+        best = None
+        best_bic = np.inf
+        bestK = None
+
+        for Kcand in range(1, int(k_max) + 1):
+            model = fit_gmm_1d(x_np, Kcand, seed=seed)
+            bic = model.bic(X)
+            if bic < best_bic:
+                best_bic = bic
+                best = model
+                bestK = Kcand
+
+        return best, bestK, float(best_bic)
+
+    # Manual
+    model = fit_gmm_1d(x_np, int(K), seed=seed)
+    bic = model.bic(X)
+    return model, int(K), float(bic)
+
+
+@st.cache_data(show_spinner=False)
+def fit_hmm_daily_sequences(
+    dfT_in: pd.DataFrame,
+    weekday_flag: bool,
+    n_states: int,
+    seed: int = 0,
+    min_bins_per_day: int = 40,   # require at least this many of 48 bins
+    use_residuals: bool = True,   # recommended
+):
+    """
+    Option B HMM: train on per-day sequences of length 48 (30-min bins).
+    Fits separate model for weekday_flag in caller.
+
+    Returns:
+      hmm: fitted GaussianHMM
+      baseline: np.ndarray shape (48,) mean curve (if use_residuals else zeros)
+      day_mat: pd.DataFrame shape (num_days, 48) filled travel times
+      gamma_mat: np.ndarray shape (num_days, 48, n_states) posterior probs
+    """
+    if not HAS_HMM:
+        return None, None, None, None
+
+    d = dfT_in.dropna(subset=["T", "tod_bin", "weekday"]).copy()
+    d = d[d["weekday"] == weekday_flag].copy()
+    if len(d) < 48 * 10:  # need at least ~10 days worth of data
+        return None, None, None, None
+
+    d = d.sort_index()
+    d["date"] = d.index.date
+
+    # day x tod_bin matrix
+    mat = (
+        d.pivot_table(index="date", columns="tod_bin",
+                      values="T", aggfunc="mean")
+        .reindex(columns=range(48))
+        .sort_index()
+    )
+
+    # keep days with enough bins
+    valid = mat.notna().sum(axis=1) >= int(min_bins_per_day)
+    mat = mat.loc[valid].copy()
+    if mat.shape[0] < 10:
+        return None, None, None, None
+
+    # fill remaining missing bins (interpolate across time-of-day)
+    mat = mat.interpolate(axis=1, limit_direction="both")
+
+    if use_residuals:
+        baseline = mat.mean(axis=0).to_numpy(dtype=float)  # (48,)
+        resid_mat = mat.to_numpy(dtype=float) - baseline[None, :]
+    else:
+        baseline = np.zeros(48, dtype=float)
+        resid_mat = mat.to_numpy(dtype=float)
+
+    # stack sequences for hmmlearn
+    X = resid_mat.reshape(-1, 1)
+    lengths = [48] * resid_mat.shape[0]
+
+    hmm = GaussianHMM(
+        n_components=int(n_states),
+        covariance_type="diag",
+        n_iter=300,
+        tol=1e-3,
+        random_state=int(seed),
+        init_params="stmc",
+    )
+    hmm.fit(X, lengths=lengths)
+
+    gamma = hmm.predict_proba(X)  # (num_days*48, n_states)
+    gamma_mat = gamma.reshape(resid_mat.shape[0], 48, int(n_states))
+
+    return hmm, baseline, mat, gamma_mat
+
+
+# ------------------ HMM HELPERS --------------------------------
+def mix_cdf(t: np.ndarray, w: np.ndarray, mu: np.ndarray, sigma: np.ndarray):
+    t = np.asarray(t, float).reshape(-1)
+    w = np.asarray(w, float)
+    mu = np.asarray(mu, float)
+    sigma = np.asarray(sigma, float)
+    z = (t[:, None] - mu[None, :]) / (sigma[None, :] + 1e-12)
+    return np.sum(w[None, :] * norm.cdf(z), axis=1)
+
+
+def mix_pdf(t: np.ndarray, w: np.ndarray, mu: np.ndarray, sigma: np.ndarray):
+    t = np.asarray(t, float).reshape(-1)
+    w = np.asarray(w, float)
+    mu = np.asarray(mu, float)
+    sigma = np.asarray(sigma, float)
+    z = (t[:, None] - mu[None, :]) / (sigma[None, :] + 1e-12)
+    return np.sum(w[None, :] * (norm.pdf(z) / (sigma[None, :] + 1e-12)), axis=1)
+
+
+def mix_mean_var(w: np.ndarray, mu: np.ndarray, sigma: np.ndarray):
+    w = np.asarray(w, float)
+    mu = np.asarray(mu, float)
+    sigma = np.asarray(sigma, float)
+    m = float(np.sum(w * mu))
+    second = float(np.sum(w * (sigma**2 + mu**2)))
+    v = max(0.0, second - m*m)
+    return m, v
+
+
+def mix_quantile(q: float, w: np.ndarray, mu: np.ndarray, sigma: np.ndarray, lo: float, hi: float, iters: int = 80):
+    lo, hi = float(lo), float(hi)
+    if hi <= lo:
+        hi = lo + 1.0
+
+    # expand bracket if needed
+    c_lo = mix_cdf(np.array([lo]), w, mu, sigma)[0]
+    c_hi = mix_cdf(np.array([hi]), w, mu, sigma)[0]
+    step = max(5.0, 0.25 * (hi - lo))
+    for _ in range(40):
+        if c_lo <= q <= c_hi:
+            break
+        if c_hi < q:
+            hi += step
+            c_hi = mix_cdf(np.array([hi]), w, mu, sigma)[0]
+        if c_lo > q:
+            lo = max(0.0, lo - step)
+            c_lo = mix_cdf(np.array([lo]), w, mu, sigma)[0]
+        step *= 1.5
+
+    # bisection
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        c = mix_cdf(np.array([mid]), w, mu, sigma)[0]
+        if c < q:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
 
 
 def nearest_station_ml(meta_ml: pd.DataFrame, lat: float, lon: float):
@@ -401,6 +580,105 @@ dest_label_default = meta_disp[meta_disp["Station"]
 def idx_of_station(st_id: int) -> int:
     return ordered.index(st_id)
 
+# -----------------------GMM Helpers ----------------------------
+
+
+def fit_gmm_1d(x: np.ndarray, K: int, seed: int = 0):
+    """
+    Fit a 1D Gaussian Mixture on x (shape [n]).
+    Returns fitted sklearn GaussianMixture.
+    """
+    x = np.asarray(x, dtype=float).reshape(-1, 1)
+
+    gmm = GaussianMixture(
+        n_components=int(K),
+        covariance_type="full",
+        # slightly stronger regularization (traffic has outliers)
+        reg_covar=1e-3,
+        n_init=10,               # more inits -> fewer bad local optima
+        init_params="kmeans",    # explicit (default), good for 1D
+        max_iter=300,            # avoid early stopping on hard buckets
+        tol=1e-3,                # convergence threshold
+        random_state=int(seed),
+    )
+    gmm.fit(x)
+    return gmm
+
+
+def gmm_mean_var_1d(gmm: GaussianMixture):
+    w = gmm.weights_.astype(float)
+    mu = gmm.means_.ravel().astype(float)
+    var_k = gmm.covariances_.reshape(-1).astype(float)
+
+    mean = float(np.sum(w * mu))
+    second = float(np.sum(w * (var_k + mu**2)))
+    var = max(0.0, second - mean**2)  # numerical safety
+    return mean, var
+
+
+def gmm_cdf_1d(gmm: GaussianMixture, t: np.ndarray):
+    t = np.asarray(t, dtype=float).reshape(-1)
+    w = gmm.weights_.astype(float)
+    mu = gmm.means_.ravel().astype(float)
+    var_k = gmm.covariances_.reshape(-1).astype(float)
+    sigma = np.sqrt(var_k + 1e-12)
+
+    z = (t[:, None] - mu[None, :]) / sigma[None, :]
+    return np.sum(w[None, :] * norm.cdf(z), axis=1)
+
+
+def gmm_pdf_1d(gmm: GaussianMixture, t: np.ndarray):
+    t = np.asarray(t, dtype=float).reshape(-1)
+    w = gmm.weights_.astype(float)
+    mu = gmm.means_.ravel().astype(float)
+    var_k = gmm.covariances_.reshape(-1).astype(float)
+    sigma = np.sqrt(var_k + 1e-12)
+
+    z = (t[:, None] - mu[None, :]) / sigma[None, :]
+    return np.sum(w[None, :] * (norm.pdf(z) / sigma[None, :]), axis=1)
+
+
+def gmm_quantile_1d(gmm: GaussianMixture, q: float, lo: float, hi: float, iters: int = 80):
+    lo, hi = float(lo), float(hi)
+    if hi <= lo:
+        hi = lo + 1.0
+
+    # Expand bracket until it contains q
+    c_lo = gmm_cdf_1d(gmm, np.array([lo]))[0]
+    c_hi = gmm_cdf_1d(gmm, np.array([hi]))[0]
+
+    # If bracket doesn't contain q, expand outward
+    # (cap expansions to avoid infinite loops)
+    step = max(5.0, 0.25 * (hi - lo))
+    for _ in range(40):
+        if c_lo <= q <= c_hi:
+            break
+        if c_hi < q:
+            hi += step
+            c_hi = gmm_cdf_1d(gmm, np.array([hi]))[0]
+        if c_lo > q:
+            lo = max(0.0, lo - step)
+            c_lo = gmm_cdf_1d(gmm, np.array([lo]))[0]
+        step *= 1.5
+
+    # Bisection
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        c = gmm_cdf_1d(gmm, np.array([mid]))[0]
+        if c < q:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def gmm_components_sorted(gmm: GaussianMixture):
+    w = gmm.weights_.astype(float)
+    mu = gmm.means_.ravel().astype(float)
+    var_k = gmm.covariances_.reshape(-1).astype(float)
+    idx = np.argsort(mu)
+    return w[idx], mu[idx], np.sqrt(var_k[idx] + 1e-12)
+
 
 # ---------------------- Sidebar controls ----------------------
 st.sidebar.header("Controls")
@@ -539,8 +817,9 @@ times = [f"{h:02d}:{m:02d}" for h in range(24) for m in (0, 30)]
 time_str = st.sidebar.selectbox(
     "Departure time (30-min bins)", times, index=32)  # default 16:00
 min_coverage = 0.90
-with st.sidebar.expander("Advanced Settings", expanded=False):
+with st.sidebar.expander("Advanced", expanded=False):
 
+    st.subheader("Data Processing Settings")
     min_coverage = st.slider(
         "Min station coverage per timestamp",
         min_value=0.50,
@@ -550,6 +829,7 @@ with st.sidebar.expander("Advanced Settings", expanded=False):
         help="Fraction of stations that must have data at a timestamp"
     )
 
+    st.subheader("UI Settings")
     layout_mode = st.radio(
         "Layout",
         ["Map first (top), Results below", "Side-by-side (Results | Map)"],
@@ -574,28 +854,34 @@ with st.sidebar.expander("Advanced Settings", expanded=False):
         step=0.5,
         help="Break map segments if stations are too far apart"
     )
+
+    st.subheader("GMM Settings")
+    use_gmm = st.checkbox("Enable GMM", value=False)
+    k_mode = st.radio("Choose K", ["Auto (BIC)", "Manual"], horizontal=True)
+
+    # Always define both, so downstream code never crashes
+    K = 2
+    k_max = 6
+
+    if k_mode == "Manual":
+        K = st.slider("Components (K)", 1, 6, 2)
+    else:
+        k_max = st.slider("Max K (BIC search)", 1, 8, 6)
+
+    st.subheader("HMM Settings")
+    use_hmm = st.checkbox("Enable HMM",
+                          value=False, disabled=not HAS_HMM)
+    n_states = st.slider("HMM states", 2, 6, 3)
+    min_bins_per_day = st.slider(
+        "Min bins/day (quality filter)", 24, 48, 40, step=1)
+    use_residuals = st.checkbox(
+        "Residualize by time-of-day baseline", value=True)
+    if use_hmm and not HAS_HMM:
+        st.sidebar.warning(
+            "hmmlearn not installed. Install: pip install hmmlearn")
+
 # ---------------------- Compute ----------------------
 dfT = compute_T_for_corridor(df, ordered, origin, dest, float(min_coverage))
-
-
-@st.cache_data(show_spinner=False)
-def station_bucket_speed(df, corridor_stations, weekday: bool, tod_label: str):
-    d = df[df["Station"].isin(corridor_stations)].copy()
-    d = d.dropna(subset=["Timestamp", "AvgSpeed"])
-    d["weekday"] = d["Timestamp"].dt.weekday < 5
-    minutes = d["Timestamp"].dt.hour * 60 + d["Timestamp"].dt.minute
-    d["tod_bin"] = (minutes // 30).astype(int)
-    d["tod_label"] = d["tod_bin"].apply(
-        lambda b: f"{(b*30)//60:02d}:{(b*30)%60:02d}")
-
-    b = d[(d["weekday"] == weekday) & (d["tod_label"] == tod_label)]
-    g = (b.groupby("Station", as_index=False)
-         .agg(mean_speed=("AvgSpeed", "mean"),
-              p10_speed=("AvgSpeed", lambda s: s.quantile(0.10)),
-              p50_speed=("AvgSpeed", "median"),
-              p90_speed=("AvgSpeed", lambda s: s.quantile(0.90)),
-              n=("AvgSpeed", "size")))
-    return g
 
 
 def make_corridor_map(df, meta_disp, ordered, i, j, weekday, time_str,
@@ -804,6 +1090,100 @@ q90 = float(x.quantile(0.90))
 q95 = float(x.quantile(0.95))
 q99 = float(x.quantile(0.99))
 
+# ---------------------- HMM (Option B) ----------------------
+hmm = None
+hmm_baseline = None
+hmm_day_mat = None
+hmm_gamma_mat = None
+
+hmm_w = hmm_mu_k = hmm_sigma_k = None
+hmm_mean = hmm_sd = None
+hmm_q95 = hmm_q99 = None
+
+if use_hmm:
+    hmm, hmm_baseline, hmm_day_mat, hmm_gamma_mat = fit_hmm_daily_sequences(
+        dfT_in=dfT,
+        weekday_flag=weekday,         # separate model for weekday/weekend
+        n_states=n_states,
+        seed=0,
+        min_bins_per_day=min_bins_per_day,
+        use_residuals=use_residuals,
+    )
+
+    if hmm is None:
+        st.sidebar.warning(
+            "HMM unavailable or not enough high-quality daily sequences.")
+    else:
+        selected_bin = int(time_str[:2]) * 2 + \
+            (1 if time_str[3:] == "30" else 0)
+
+        # state weights for this bin: average posterior across days
+        w = hmm_gamma_mat[:, selected_bin, :].mean(axis=0)
+        w = np.clip(w, 1e-9, None)
+        w = w / w.sum()
+
+        mu_res = hmm.means_.ravel().astype(float)
+        sigma_res = np.sqrt(hmm.covars_.ravel().astype(float) + 1e-12)
+
+        base = float(hmm_baseline[selected_bin]) if use_residuals else 0.0
+
+        hmm_w = w
+        hmm_mu_k = base + mu_res
+        hmm_sigma_k = sigma_res
+
+        hmm_mean, hmm_var = mix_mean_var(hmm_w, hmm_mu_k, hmm_sigma_k)
+        hmm_sd = float(np.sqrt(hmm_var))
+
+        x_np = x.to_numpy(dtype=float)
+        lo = max(0.0, float(np.quantile(x_np, 0.001) - 15))
+        hi = float(np.quantile(x_np, 0.999) + 15)
+        if hi <= lo + 1e-6:
+            hi = lo + 1.0
+
+        hmm_q95 = mix_quantile(0.95, hmm_w, hmm_mu_k,
+                               hmm_sigma_k, lo=lo, hi=hi)
+        hmm_q99 = mix_quantile(0.99, hmm_w, hmm_mu_k,
+                               hmm_sigma_k, lo=lo, hi=hi)
+
+
+gmm = None
+gmm_K = None
+gmm_bic = None
+gmm_mu = gmm_sd = None
+gmm_q95 = gmm_q99 = None
+
+if use_gmm:
+    x_np = x.to_numpy(dtype=float)
+
+    if len(x_np) < 30:
+        st.sidebar.warning("Not enough samples for a stable GMM (need ~30+).")
+    else:
+        # ---- fit (cached) ----
+        gmm, gmm_K, gmm_bic = fit_gmm_cached(
+            x_values=x_np,
+            k_mode=k_mode,
+            K=K,
+            k_max=k_max,
+            seed=0,
+        )
+
+        # fit_gmm_cached can still return None if something went wrong
+        if gmm is None:
+            st.sidebar.warning("GMM fit failed for this bucket/settings.")
+        else:
+            # ---- moments ----
+            gmm_mu, gmm_var = gmm_mean_var_1d(gmm)
+            gmm_sd = float(np.sqrt(gmm_var))
+
+            # ---- bracket for quantiles: empirical padded range ----
+            lo = max(0.0, float(np.quantile(x_np, 0.001) - 15))
+            hi = float(np.quantile(x_np, 0.999) + 15)
+            if hi <= lo + 1e-6:  # extremely degenerate case
+                hi = lo + 1.0
+
+            gmm_q95 = gmm_quantile_1d(gmm, 0.95, lo=lo, hi=hi)
+            gmm_q99 = gmm_quantile_1d(gmm, 0.99, lo=lo, hi=hi)
+
 
 map_fig = make_corridor_map(df, meta_disp, ordered, i, j, weekday, time_str,
                             downsample_step=downsample_step,
@@ -838,14 +1218,37 @@ if layout_mode.startswith("Side-by-side"):
         d3.metric("p99 (min)", f"{q99:.1f}")
         d4.metric("BTI", f"{bti:.3f}")
 
+        if gmm is not None:
+            st.markdown(f"**GMM fit:** K={gmm_K} (BIC={gmm_bic:.1f})")
+            g1, g2, g3, g4 = st.columns(4)
+            g1.metric("GMM mean (min)", f"{gmm_mu:.1f}")
+            g2.metric("GMM std (min)", f"{gmm_sd:.1f}")
+            g3.metric("GMM p95 (min)", f"{gmm_q95:.1f}")
+            g4.metric("GMM p99 (min)", f"{gmm_q99:.1f}")
+
+        if hmm_w is not None:
+            st.markdown(
+                f"**HMM regime model:** states={n_states} (trained on {'Weekday' if weekday else 'Weekend'} days)")
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("HMM mean (min)", f"{hmm_mean:.1f}")
+            h2.metric("HMM std (min)", f"{hmm_sd:.1f}")
+            h3.metric("HMM p95 (min)", f"{hmm_q95:.1f}")
+            h4.metric("HMM p99 (min)", f"{hmm_q99:.1f}")
+
+            st.caption("State weights @ this time bin: " +
+                       ", ".join([f"s{k}={hmm_w[k]:.2f}" for k in range(len(hmm_w))]))
+
         e1, e2 = st.columns(2)
         with e1:
             st.write("**95% CI for mean (CLT)**")
             st.write(f"[{ci_lo:.1f}, {ci_hi:.1f}] minutes")
         with e2:
             st.write("**Quick interpretation**")
+            plan95 = gmm_q95 if gmm is not None else q95
             st.write(
-                f"Plan around **{q95:.0f} min** to be ~95% safe in this bucket.")
+                f"Plan around **{plan95:.0f} min** to be ~95% safe in this bucket.")
+            # st.write(
+            # f"Plan around **{q95:.0f} min** to be ~95% safe in this bucket.")
 
     with right:
         st.subheader("Map")
@@ -882,6 +1285,26 @@ else:
     d3.metric("p99 (min)", f"{q99:.1f}")
     d4.metric("BTI", f"{bti:.3f}")
 
+    if gmm is not None:
+        st.markdown(f"**GMM fit:** K={gmm_K}")
+        g1, g2, g3, g4 = st.columns(4)
+        g1.metric("GMM mean (min)", f"{gmm_mu:.1f}")
+        g2.metric("GMM std (min)", f"{gmm_sd:.1f}")
+        g3.metric("GMM p95 (min)", f"{gmm_q95:.1f}")
+        g4.metric("GMM p99 (min)", f"{gmm_q99:.1f}")
+
+    if hmm_w is not None:
+        st.markdown(
+            f"**HMM regime model:** states={n_states} (trained on {'Weekday' if weekday else 'Weekend'} days)")
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("HMM mean (min)", f"{hmm_mean:.1f}")
+        h2.metric("HMM std (min)", f"{hmm_sd:.1f}")
+        h3.metric("HMM p95 (min)", f"{hmm_q95:.1f}")
+        h4.metric("HMM p99 (min)", f"{hmm_q99:.1f}")
+
+        st.caption("State weights @ this time bin: " +
+                   ", ".join([f"s{k}={hmm_w[k]:.2f}" for k in range(len(hmm_w))]))
+
     e1, e2 = st.columns(2)
     with e1:
         st.write("**95% CI for mean (CLT)**")
@@ -916,10 +1339,20 @@ with st.expander("Lateness / reliability (optional)", expanded=False):
     cdf_at_tau = float((x <= tau).mean())
     st.write(f"**P(T > τ)** ≈ {p_late:.3f}")
     st.write(f"Empirical CDF at τ: **F(τ) ≈ {cdf_at_tau:.3f}**")
+    if tau is not None and gmm is not None:
+        p_late_gmm = 1.0 - gmm_cdf_1d(gmm, np.array([tau]))[0]
+        st.write(f"**GMM P(T > τ)** ≈ {p_late_gmm:.3f}")
+    if tau is not None and hmm_w is not None:
+        p_late_hmm = 1.0 - \
+            mix_cdf(np.array([tau]), hmm_w, hmm_mu_k, hmm_sigma_k)[0]
+        st.write(f"**HMM P(T > τ)** ≈ {p_late_hmm:.3f}")
+
 
 # ---------------------- Prettier plots in tabs ----------------------
 st.subheader("Plots")
-tab1, tab2, tab3 = st.tabs(["Time-of-day curve", "CDF", "Histogram / PDF"])
+tab1, tab2, tab3, tab4 = st.tabs(
+    ["Time-of-day curve", "CDF", "Histogram / PDF", "HMM Regimes"])
+
 
 # Shared x-range
 xmin = max(0.0, float(x.quantile(0.01) - 10))
@@ -1030,6 +1463,26 @@ with tab2:
         name="Empirical CDF"
     ))
 
+    if gmm is not None:
+        grid = np.linspace(float(xmin), float(xmax), 400)
+        cdf_g = gmm_cdf_1d(gmm, grid)
+        cdf.add_trace(go.Scatter(
+            x=grid, y=cdf_g,
+            mode="lines",
+            line=dict(dash="dash"),
+            name="GMM CDF"
+        ))
+
+    if hmm_w is not None:
+        grid = np.linspace(float(xmin), float(xmax), 400)
+        cdf_h = mix_cdf(grid, hmm_w, hmm_mu_k, hmm_sigma_k)
+        cdf.add_trace(go.Scatter(
+            x=grid, y=cdf_h,
+            mode="lines",
+            line=dict(dash="dot"),
+            name="HMM CDF"
+        ))
+
     cdf.update_layout(
         template="plotly_white",
         title="Empirical CDF",
@@ -1059,6 +1512,24 @@ with tab3:
         labels={"value": "Travel time (minutes)"},
         title="Empirical travel-time distribution",
     )
+    if gmm is not None:
+        grid = np.linspace(float(xmin), float(xmax), 400)
+        pdf_g = gmm_pdf_1d(gmm, grid)
+        hist.add_trace(go.Scatter(
+            x=grid, y=pdf_g,
+            mode="lines",
+            name="GMM PDF"
+        ))
+
+    if hmm_w is not None:
+        grid = np.linspace(float(xmin), float(xmax), 400)
+        pdf_h = mix_pdf(grid, hmm_w, hmm_mu_k, hmm_sigma_k)
+        hist.add_trace(go.Scatter(
+            x=grid, y=pdf_h,
+            mode="lines",
+            line=dict(dash="dot"),
+            name="HMM PDF"
+        ))
     hist.update_layout(
         template="plotly_white",
         margin=dict(l=20, r=20, t=50, b=20),
@@ -1098,6 +1569,198 @@ with tab3:
     ))
 
     st.plotly_chart(hist, width='stretch')
+
+with tab4:
+    # st.subheader("HMM Regimes (state probabilities + baseline travel time)")
+
+    if not use_hmm:
+        st.info("Enable the HMM in the sidebar to see regime plots.")
+    elif hmm is None or hmm_gamma_mat is None or hmm_baseline is None:
+        st.warning(
+            "HMM model not available for this selection (insufficient data or missing hmmlearn).")
+    else:
+        # ------------------------------------------------------------
+        # Data prep
+        # ------------------------------------------------------------
+        K_states = hmm_gamma_mat.shape[2]  # n_states
+        gamma_by_bin = hmm_gamma_mat.mean(axis=0)  # (48, K)
+
+        tod_labels = [f"{(b*30)//60:02d}:{(b*30)%60:02d}" for b in range(48)]
+        tod_bin = np.arange(48)
+
+        selected_bin = int(time_str[:2]) * 2 + \
+            (1 if time_str[3:] == "30" else 0)
+
+        # Residual emission params (means/stds)
+        mu_res = hmm.means_.ravel().astype(float)  # (K,)
+        sig_res = np.sqrt(hmm.covars_.ravel().astype(float) + 1e-12)  # (K,)
+
+        # Baseline curve (travel time mean by bin) from training set
+        base = np.asarray(hmm_baseline, dtype=float).reshape(-1)  # (48,)
+
+        # State mean curves in original T space: baseline + residual_mean_k
+        state_mean_curves = base[:, None] + mu_res[None, :]  # (48, K)
+
+        # ------------------------------------------------------------
+        # Plot A: Stacked area of regime probabilities over day
+        # ------------------------------------------------------------
+        st.markdown("### Regime occupancy over time-of-day (stacked)")
+
+        fig_area = go.Figure()
+
+        # Stacked area: each trace is one state
+        # stackgroup makes areas stack to 1
+        # for k in range(K_states):
+        #     fig_area.add_trace(go.Scatter(
+        #         x=tod_bin,
+        #         y=gamma_by_bin[:, k],
+        #         mode="lines",
+        #         name=f"state {k}",
+        #         stackgroup="one",
+        #         groupnorm="fraction",  # ensures total is 1
+        #         hovertemplate="bin=%{x} (%{customdata})<br>P(state)= %{y:.2f}<extra></extra>",
+        #         customdata=tod_labels,
+        #         line=dict(width=1),
+        #     ))
+        order = np.argsort(mu_res)  # low residual to high residual
+        for k in order:
+            fig_area.add_trace(go.Scatter(
+                x=tod_bin,
+                y=gamma_by_bin[:, k],
+                name=f"state {k}",
+                stackgroup="one",
+                mode="none",                 # ✅ no lines
+                # hoveron="fills",             # ✅ hover works on filled areas
+                hovertemplate="bin=%{x} (%{customdata})<br>P(state)= %{y:.2f}<extra></extra>",
+                customdata=tod_labels,
+            ))
+        # Highlight selected time bin
+        fig_area.add_shape(
+            type="line",
+            x0=selected_bin, x1=selected_bin,
+            y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(width=2, dash="dot"),
+        )
+        fig_area.add_annotation(
+            x=selected_bin, y=1.08,
+            xref="x", yref="paper",
+            text=f"selected {('Weekday' if weekday else 'Weekend')} {time_str}",
+            showarrow=False
+        )
+
+        tickvals = list(range(0, 48, 2))
+        ticktext = [f"{h:02d}:00" for h in range(24)]
+
+        fig_area.update_layout(
+            template="plotly_white",
+            title=f"P(state | time-of-day) averaged over days ({'Weekday' if weekday else 'Weekend'} model)",
+            xaxis_title="Departure time (30-min bins)",
+            yaxis_title="Probability (stacked to 1)",
+            height=420,
+            margin=dict(l=20, r=20, t=60, b=20),
+            legend=dict(orientation="h", yanchor="bottom",
+                        y=1.02, xanchor="left", x=0),
+        )
+        fig_area.update_xaxes(
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            range=[-0.5, 47.5],
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.06)",
+        )
+        fig_area.update_yaxes(
+            range=[0, 1],
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.06)",
+        )
+
+        st.plotly_chart(fig_area, width="stretch")
+        st.caption(
+            "Each area shows how often the model believes the corridor is in a given latent regime at that time-of-day.")
+
+        # ------------------------------------------------------------
+        # Plot B: Baseline travel time + state mean curves
+        # ------------------------------------------------------------
+        st.markdown("### Baseline travel time and regime-conditioned means")
+
+        fig_base = go.Figure()
+
+        # baseline curve
+        fig_base.add_trace(go.Scatter(
+            x=tod_bin,
+            y=base,
+            mode="lines+markers",
+            name="baseline mean",
+            hovertemplate="bin=%{x} (%{customdata})<br>baseline=%{y:.1f} min<extra></extra>",
+            customdata=tod_labels,
+            line=dict(width=3),
+        ))
+
+        # state mean curves (baseline + residual mean)
+        # (keep as lines; can be many traces but K<=6 in your UI so ok)
+        for k in range(K_states):
+            fig_base.add_trace(go.Scatter(
+                x=tod_bin,
+                y=state_mean_curves[:, k],
+                mode="lines",
+                name=f"state {k} mean",
+                hovertemplate="bin=%{x} (%{customdata})<br>state-mean=%{y:.1f} min<extra></extra>",
+                customdata=tod_labels,
+                line=dict(dash="dash"),
+                opacity=0.9,
+            ))
+
+        # selected bin marker
+        fig_base.add_shape(
+            type="line",
+            x0=selected_bin, x1=selected_bin,
+            y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(width=2, dash="dot"),
+        )
+
+        fig_base.update_layout(
+            template="plotly_white",
+            title="Baseline mean curve and regime-conditioned mean travel times",
+            xaxis_title="Departure time (30-min bins)",
+            yaxis_title="Travel time (minutes)",
+            height=420,
+            margin=dict(l=20, r=20, t=60, b=20),
+            legend=dict(orientation="h", yanchor="bottom",
+                        y=1.02, xanchor="left", x=0),
+        )
+        fig_base.update_xaxes(
+            tickmode="array",
+            tickvals=tickvals,
+            ticktext=ticktext,
+            range=[-0.5, 47.5],
+            showgrid=True,
+            gridcolor="rgba(0,0,0,0.06)",
+        )
+        fig_base.update_yaxes(showgrid=True, gridcolor="rgba(0,0,0,0.06)")
+
+        st.plotly_chart(fig_base, width="stretch")
+        st.caption(
+            "The HMM is trained on residuals: residual = T - baseline(time). "
+            "So each regime shifts the baseline up/down by its residual mean."
+        )
+
+        # ------------------------------------------------------------
+        # Compact state parameter table (residual space)
+        # ------------------------------------------------------------
+        st.markdown("### State emission parameters (residual space)")
+
+        # Sort by residual mean for interpretability
+        order = np.argsort(mu_res)
+        info = pd.DataFrame({
+            "state": order,
+            "residual_mean (min)": mu_res[order],
+            "residual_std (min)": sig_res[order],
+            "selected-bin weight": (hmm_w[order] if hmm_w is not None else np.nan),
+        })
+        st.dataframe(info, width='stretch')
 
 # ----------------------  selection / coverage ( collapsed) ----------------------
 # Collapsed details
