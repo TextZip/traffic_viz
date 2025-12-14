@@ -47,7 +47,7 @@ The project is designed to be:
 
 ## ✨ Features
 
-- Flexible start/end specification (station IDs *or* human-readable names)
+- Flexible start/end specification (station IDs/names *or* general addresses)
 - Corridor-level travel time estimation
 - Time-of-day and weekday/weekend conditioning
 - Probabilistic metrics:
@@ -74,15 +74,15 @@ The project is designed to be:
 ```bash
 traffic_viz
 ├── data
-│   ├── 5min_data                 # ⬇️ Download required (raw PeMS data)
+│   ├── 5min_data  # ⬇️ Download required (raw PeMS data)
 │   │   ├── d07_text_station_5min_2025_10_01.txt.gz
 │   │   ├── d07_text_station_5min_2025_10_02.txt.gz
 │   │   └── d12_text_station_5min_2025_10_31.txt.gz
-│   ├── cache_parquet             # Generated after preprocessing
+│   ├── cache_parquet # Generated after preprocessing
 │   │   ├── d07_text_station_5min_2025_10_01.parquet
 │   │   ├── d07_text_station_5min_2025_10_03.parquet
 │   │   └── d07_text_station_5min_2025_10_04.parquet
-│   └── station_metadata          # Station ID ↔ name mapping
+│   └── station_metadata  # Station ID ↔ name mapping
 │       ├── d07_text_meta_2023_12_22.txt
 │       ├── d11_text_meta_2022_03_16.txt
 │       └── d12_text_meta_2023_12_05.txt
