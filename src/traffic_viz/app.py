@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from scipy.stats import norm
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.colors import sample_colorscale
@@ -130,21 +130,6 @@ def haversine_km(lat1, lon1, lat2, lon2):
     dl = np.radians(lon2 - lon1)
     a = np.sin(dphi / 2) ** 2 + np.cos(p1) * np.cos(p2) * np.sin(dl / 2) ** 2
     return 2 * R * np.arcsin(np.sqrt(a))
-
-
-def corridor_viewbox_ca(meta_ml: pd.DataFrame, pad_deg: float = 0.15):
-    """
-    Bounding box tightly enclosing the I-5 NB ML stations.
-    pad_deg ≈ 0.15° ≈ 10–15 km buffer.
-
-    Returns (lon_min, lat_max, lon_max, lat_min) for Nominatim.
-    """
-    lat_min = float(meta_ml["Latitude"].min()) - pad_deg
-    lat_max = float(meta_ml["Latitude"].max()) + pad_deg
-    lon_min = float(meta_ml["Longitude"].min()) - pad_deg
-    lon_max = float(meta_ml["Longitude"].max()) + pad_deg
-
-    return lon_min, lat_max, lon_max, lat_min
 
 
 @st.cache_data(show_spinner=False)
@@ -534,41 +519,6 @@ station_to_label_ml = dict(zip(meta_ml["Station"], meta_ml["label"]))
 labels = meta_disp["label"].tolist()
 label_to_station = dict(zip(meta_disp["label"], meta_disp["Station"]))
 
-# # Defensive: if Name missing
-# if "Name" not in meta_disp.columns:
-#     meta_disp["Name"] = "(no name)"
-
-# # Ensure Station is int-like for dropdown mapping
-# meta_disp = meta_disp.dropna(subset=["Station"]).copy()
-# meta_disp["Station"] = meta_disp["Station"].astype(int)
-
-# # when building meta_disp["label"]
-# spm = meta_disp["State_PM"] if "State_PM" in meta_disp.columns else np.nan
-# apm = meta_disp["Abs_PM"] if "Abs_PM" in meta_disp.columns else np.nan
-
-# meta_disp["label"] = (
-#     meta_disp["Name"].astype(str).fillna("(no name)") +
-#     " | ID=" + meta_disp["Station"].astype(str) +
-#     " | D=" + meta_disp["District"].astype(int).astype(str) +
-#     ((" | AbsPM=" + apm.round(2).astype(str)) if "Abs_PM" in meta_disp.columns else "") +
-#     ((" | StatePM=" + spm.round(2).astype(str))
-#      if "State_PM" in meta_disp.columns else "")
-# )
-
-
-# meta_disp = meta_disp[meta_disp["Station"].isin(ordered)].copy()
-
-# sort_key = "Postmile" if "Postmile" in meta_disp.columns else (
-#     "Latitude" if "Latitude" in meta_disp.columns else None)
-
-# # sort_key = "Postmile" if "Postmile" in meta_disp.columns else (
-# #     "Lat" if "Lat" in meta_disp.columns else None)
-# if sort_key and sort_key in meta_disp.columns:
-#     meta_disp = meta_disp.sort_values(sort_key)
-
-# labels = meta_disp["label"].tolist()
-# label_to_station = dict(zip(meta_disp["label"], meta_disp["Station"]))
-
 default_origin = int(meta_disp[meta_disp["District"] == 11]["Station"].iloc[0])
 default_dest = int(meta_disp[meta_disp["District"] == 7]["Station"].iloc[-1])
 origin_label_default = meta_disp[meta_disp["Station"]
@@ -705,7 +655,7 @@ with st.sidebar.expander("Search by location", expanded=False):
     set_start = c1.button("Set start", width='stretch')
     set_end = c2.button("Set end", width='stretch')
 
-    viewbox = corridor_viewbox_ca(meta_ml, pad_deg=0.2)
+    # viewbox = corridor_viewbox_ca(meta_ml, pad_deg=0.2)
     WARN_KM = 20.0
 
     if set_start and start_q.strip():
@@ -1608,20 +1558,6 @@ with tab4:
 
         fig_area = go.Figure()
 
-        # Stacked area: each trace is one state
-        # stackgroup makes areas stack to 1
-        # for k in range(K_states):
-        #     fig_area.add_trace(go.Scatter(
-        #         x=tod_bin,
-        #         y=gamma_by_bin[:, k],
-        #         mode="lines",
-        #         name=f"state {k}",
-        #         stackgroup="one",
-        #         groupnorm="fraction",  # ensures total is 1
-        #         hovertemplate="bin=%{x} (%{customdata})<br>P(state)= %{y:.2f}<extra></extra>",
-        #         customdata=tod_labels,
-        #         line=dict(width=1),
-        #     ))
         order = np.argsort(mu_res)  # low residual to high residual
         for k in order:
             fig_area.add_trace(go.Scatter(
