@@ -23,11 +23,11 @@
 </p>
 <p align="center">
   <strong>README Navigation</strong><br>
-  <a href="#features">Features</a> •
-  <a href="#project-structure">Project Structure</a> •
-  <a href="#getting-started">Getting Started</a> •
-  <a href="#data-setup">Data Setup</a> •
-  <a href="#inference--visualization">Inference</a>
+  <a href="#-features">Features</a> •
+  <a href="#-project-structure">Project Structure</a> •
+  <a href="#-getting-started">Getting Started</a> •
+  <a href="#-data-setup">Data Setup</a> •
+  <a href="#-inference--visualization">Inference</a>
 </p>
 
 ---
