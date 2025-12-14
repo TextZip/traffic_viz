@@ -139,10 +139,10 @@ GoogleDrive/data/5min_data
 traffic_viz/data/5min_data
 ```
 
-[!IMPORTANT]
+> [!IMPORTANT]
 > Refer to the Project Structure section to ensure files are placed correctly.
 
-[!NOTE]
+> [!NOTE]
 > Only `5min_data` must be downloaded.
 > `station_metadata` and `cache_parquet` are already included in the repository. Copies in Google Drive are provided only for redundancy.
 
