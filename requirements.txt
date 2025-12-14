@@ -8,3 +8,4 @@ scikit-learn>=1.3
 tqdm>=4.66
 hmmlearn>=0.3.0
 pyarrow>=12
+-e .
