@@ -39,3 +39,4 @@ data/derived/
 .vscode/
 .idea/
 *.swp
+.prettierignore
