@@ -75,7 +75,7 @@ st.markdown(
     <div style="text-align: center; margin-top: 0.5rem;">
         🔗 <a href="https://github.com/TextZip/traffic_viz" target="_blank">Code</a>
         &nbsp;&nbsp;|&nbsp;&nbsp;
-        📄 <a href="https://your-report-link.com" target="_blank">Report</a>
+        📄 <a href="https://drive.google.com/file/d/1c1NcC8z1EK5XPaLwvYaR1JTWvFqHbAv1/view?usp=drive_link" target="_blank">Report</a>
         &nbsp;&nbsp;|&nbsp;&nbsp;
         📂 <a href="https://drive.google.com/drive/folders/1Ms151kBdxH-d284sY8oyMqVU61OwpqXG?usp=sharing" target="_blank">Dataset</a>
     </div>
